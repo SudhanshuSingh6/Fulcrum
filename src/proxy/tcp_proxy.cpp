@@ -6,8 +6,14 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <memory>
+#include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
+
+#include "core/socket.h"
+#include "proxy/connection.h"
 
 namespace fulcrum {
 
@@ -49,17 +55,55 @@ AcceptError classify_accept_error(int err) {
 
 constexpr auto kResourceBackoff = std::chrono::milliseconds(100);
 
+constexpr auto kConnectTimeout = std::chrono::milliseconds(1000);
+
+// Tries each backend once, starting at `first`, and returns the first one
+// that connects. Returns an invalid Fd if all of them fail.
+Fd connect_with_failover(const BackendPool& pool, std::size_t first) {
+  const std::size_t n = pool.backends.size();
+  for (std::size_t i = 0; i < n; ++i) {
+    const HostPort& addr = pool.backends[(first + i) % n];
+    std::string error;
+    Fd backend = connect_tcp(addr, kConnectTimeout, error);
+    if (backend) return backend;
+    spdlog::warn("backend {} failed: {}", addr.to_string(), error);
+  }
+  return Fd{};
+}
+
+// Runs on the connection's own thread: pick a backend, then relay.
+void handle_client(Fd client, std::shared_ptr<BackendPool> pool, std::size_t first) {
+  Fd backend = connect_with_failover(*pool, first);
+  if (!backend) {
+    spdlog::warn("outcome=no_backend: all {} backends failed", pool->backends.size());
+    return;  // client is closed when it goes out of scope
+  }
+  try {
+    relay(std::move(client), std::move(backend));
+  } catch (const std::system_error& e) {
+    spdlog::warn("cannot start relay thread: {}", e.what());
+  }
+}
+
 }  // namespace
 
 TcpProxy::TcpProxy(Fd listener, std::vector<HostPort> backends)
-    : listener_(std::move(listener)), backends_(std::move(backends)) {}
+    : listener_(std::move(listener)), pool_(std::make_shared<BackendPool>(std::move(backends))) {}
 
 void TcpProxy::run() {
   for (;;) {
     Fd client(::accept4(listener_.get(), nullptr, nullptr, SOCK_CLOEXEC));
     if (client) {
-      // Phase 1: accept and close (the Fd destructor closes it).
-      // Phase 2 hands the client to a Connection instead.
+      // Pick the starting backend here, in accept order, so sequential clients
+      // go a, b, c, a, ... exactly. Failover continues from this index.
+      const std::size_t first = pool_->rr.next();
+      try {
+        std::thread(handle_client, std::move(client), pool_, first).detach();
+      } catch (const std::system_error& e) {
+        // Thread limit reached. The client was moved into the failed thread's
+        // arguments and is closed with them; keep accepting others.
+        spdlog::warn("cannot start connection thread: {}", e.what());
+      }
       continue;
     }
 

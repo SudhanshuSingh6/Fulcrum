@@ -1,6 +1,7 @@
 #include "process.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <spawn.h>
@@ -30,14 +31,26 @@ sockaddr_in loopback(std::uint16_t port) {
 
 }  // namespace
 
-Process Process::spawn(const std::string& path, const std::vector<std::string>& args) {
+Process Process::spawn(const std::string& path, const std::vector<std::string>& args,
+                       const std::string& output_file) {
   std::vector<char*> argv;
   argv.push_back(const_cast<char*>(path.c_str()));
   for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
   argv.push_back(nullptr);
 
+  // File actions run in the child between fork and exec: open the file as
+  // stdout, then duplicate it onto stderr.
+  posix_spawn_file_actions_t actions;
+  posix_spawn_file_actions_init(&actions);
+  if (!output_file.empty()) {
+    posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, output_file.c_str(),
+                                     O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    posix_spawn_file_actions_adddup2(&actions, STDOUT_FILENO, STDERR_FILENO);
+  }
+
   pid_t pid = -1;
-  const int rc = posix_spawn(&pid, path.c_str(), nullptr, nullptr, argv.data(), environ);
+  const int rc = posix_spawn(&pid, path.c_str(), &actions, nullptr, argv.data(), environ);
+  posix_spawn_file_actions_destroy(&actions);
   if (rc != 0) {
     std::fprintf(stderr, "posix_spawn(%s) failed: %s\n", path.c_str(), std::strerror(rc));
     std::abort();

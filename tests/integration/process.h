@@ -14,8 +14,10 @@ namespace fulcrum::test {
 // (SIGTERM, then SIGKILL after a grace period) and reaps it.
 class Process {
  public:
-  // Starts `path` with `args` (not including argv[0]). Aborts the test run on failure.
-  static Process spawn(const std::string& path, const std::vector<std::string>& args);
+  // Starts `path` with `args` (not including argv[0]). If `output_file` is
+  // set, the child's stdout and stderr go to that file. Aborts the test run on failure.
+  static Process spawn(const std::string& path, const std::vector<std::string>& args,
+                       const std::string& output_file = "");
 
   Process() noexcept = default;  // empty: owns no process
   Process(Process&& other) noexcept;

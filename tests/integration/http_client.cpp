@@ -35,18 +35,33 @@ bool write_all(int fd, std::string_view data) {
 
 }  // namespace
 
-std::optional<HttpResponse> http_request(std::uint16_t port, const std::string& method,
-                                         const std::string& path, const std::string& body) {
-  FdGuard sock{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
-  if (sock.fd < 0) return std::nullopt;
-
+int connect_loopback(std::uint16_t port) {
+  const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (fd < 0) return -1;
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(port);
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  if (::connect(sock.fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-    return std::nullopt;
+  if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+    ::close(fd);
+    return -1;
   }
+  return fd;
+}
+
+std::optional<HttpResponse> parse_response(const std::string& raw) {
+  HttpResponse resp;
+  if (std::sscanf(raw.c_str(), "HTTP/1.%*d %d", &resp.status) != 1) return std::nullopt;
+  const auto header_end = raw.find("\r\n\r\n");
+  if (header_end == std::string::npos) return std::nullopt;
+  resp.body = raw.substr(header_end + 4);
+  return resp;
+}
+
+std::optional<HttpResponse> http_request(std::uint16_t port, const std::string& method,
+                                         const std::string& path, const std::string& body) {
+  FdGuard sock{connect_loopback(port)};
+  if (sock.fd < 0) return std::nullopt;
 
   std::string req = method + " " + path + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n";
   if (!body.empty() || method == "POST") {
@@ -68,12 +83,7 @@ std::optional<HttpResponse> http_request(std::uint16_t port, const std::string& 
     raw.append(buf, static_cast<size_t>(n));
   }
 
-  HttpResponse resp;
-  if (std::sscanf(raw.c_str(), "HTTP/1.%*d %d", &resp.status) != 1) return std::nullopt;
-  const auto header_end = raw.find("\r\n\r\n");
-  if (header_end == std::string::npos) return std::nullopt;
-  resp.body = raw.substr(header_end + 4);
-  return resp;
+  return parse_response(raw);
 }
 
 }  // namespace fulcrum::test
